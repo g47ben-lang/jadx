@@ -11,7 +11,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.swing.JButton;
@@ -137,17 +136,19 @@ public class AiAssistantPanel extends JPanel {
 	}
 
 	/**
-	 * Builds the full project code dump (AndroidManifest.xml + every decompiled class) and lets
-	 * the user save it to a .txt file, to paste into an external AI tool (Claude, ChatGPT, ...)
-	 * themselves - independent of whether the AI Assistant itself is configured/enabled.
+	 * Builds the full project code dump (AndroidManifest.xml + every decompiled class), split into
+	 * ~18 MB parts, and lets the user save them into a folder, to upload to an external AI tool
+	 * (Claude, ChatGPT, ...) themselves - independent of whether the AI Assistant itself is
+	 * configured/enabled. Split into multiple files since a single dump can easily reach tens of
+	 * MB for a real app, well past what most AI tools accept as one upload.
 	 */
 	private void exportProjectCode() {
 		setBusy(true);
-		AtomicReference<String> dump = new AtomicReference<>();
+		AtomicReference<List<String>> chunks = new AtomicReference<>();
 		AtomicReference<String> error = new AtomicReference<>();
 		mainWindow.getBackgroundExecutor().execute(NLS.str("ai_assistant.exporting"), () -> {
 			try {
-				dump.set(new ProjectCodeExporter(mainWindow).exportAll());
+				chunks.set(new ProjectCodeExporter(mainWindow).exportAllChunked());
 			} catch (Throwable e) {
 				error.set(e.getMessage() != null ? e.getMessage() : e.toString());
 			}
@@ -157,31 +158,29 @@ public class AiAssistantPanel extends JPanel {
 				JOptionPane.showMessageDialog(this, error.get(),
 						NLS.str("ai_assistant.export_code.failed"), JOptionPane.ERROR_MESSAGE);
 			} else {
-				saveExportedCode(dump.get());
+				saveExportedCode(chunks.get());
 			}
 		});
 	}
 
-	private void saveExportedCode(String content) {
+	private void saveExportedCode(List<String> chunks) {
 		FileDialogWrapper fileDialog = new FileDialogWrapper(mainWindow, FileOpenMode.CUSTOM_SAVE);
-		fileDialog.setTitle(NLS.str("ai_assistant.export_code"));
-		Path currentDir = fileDialog.getCurrentDir();
-		if (currentDir != null) {
-			fileDialog.setSelectedFile(currentDir.resolve("project_code.txt"));
-		}
-		fileDialog.setFileExtList(List.of("txt"));
-		fileDialog.setSelectionMode(JFileChooser.FILES_ONLY);
+		fileDialog.setTitle(NLS.str("ai_assistant.export_code.select_folder"));
+		fileDialog.setSelectionMode(JFileChooser.DIRECTORIES_ONLY);
 		List<Path> paths = fileDialog.show();
 		if (paths.size() != 1) {
 			return;
 		}
-		Path path = paths.get(0);
-		if (!path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".txt")) {
-			path = path.resolveSibling(path.getFileName() + ".txt");
-		}
+		Path dir = paths.get(0);
 		try {
-			Files.writeString(path, content, StandardCharsets.UTF_8);
-			JOptionPane.showMessageDialog(this, NLS.str("ai_assistant.export_code.success", path.toString()),
+			Files.createDirectories(dir);
+			boolean multiPart = chunks.size() > 1;
+			for (int i = 0; i < chunks.size(); i++) {
+				String fileName = multiPart ? "project_code_part" + (i + 1) + ".txt" : "project_code.txt";
+				Files.writeString(dir.resolve(fileName), chunks.get(i), StandardCharsets.UTF_8);
+			}
+			JOptionPane.showMessageDialog(this,
+					NLS.str("ai_assistant.export_code.success", dir.toString(), String.valueOf(chunks.size())),
 					NLS.str("ai_assistant.export_code"), JOptionPane.INFORMATION_MESSAGE);
 		} catch (IOException e) {
 			JOptionPane.showMessageDialog(this, e.getMessage(),
