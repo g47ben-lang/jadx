@@ -21,7 +21,6 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -33,13 +32,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.annotations.SerializedName;
 
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 /**
- * Minimal client for an OpenAI-compatible "chat/completions" HTTP API.
+ * Minimal client for an OpenAI-compatible "chat/completions" HTTP API, with optional
+ * "search_code" tool-calling support so the model can look at the actual decompiled project
+ * instead of only answering from general knowledge.
  * Network access (proxy, extra trusted CA certificate) is configured manually
  * from {@link AiSettings}, jadx does not auto-detect system proxies or filtering software.
  */
@@ -47,6 +49,8 @@ public class AiClient {
 	private static final Logger LOG = LoggerFactory.getLogger(AiClient.class);
 	private static final Gson GSON = new Gson();
 	private static final Duration TIMEOUT = Duration.ofSeconds(60);
+	private static final int MAX_TOOL_ROUNDS = 4;
+	private static final int MAX_SEARCH_MATCHES = 10;
 
 	private final AiSettings settings;
 
@@ -55,9 +59,118 @@ public class AiClient {
 	}
 
 	/**
+	 * Simple one-shot request with no tool use.
 	 * Blocking call, must be executed on a background thread.
 	 */
 	public String sendMessage(List<AiChatMessage> messages) throws IOException, InterruptedException {
+		JsonArray requestMessages = new JsonArray();
+		for (AiChatMessage m : messages) {
+			requestMessages.add(toMessageJson(m));
+		}
+		return textOf(sendRaw(requestMessages, null));
+	}
+
+	/**
+	 * Runs a conversation that may involve the AI calling the "search_code" tool to look at the
+	 * actual decompiled project before answering.
+	 * Blocking call, must be executed on a background thread.
+	 */
+	public String askWithTools(List<AiChatMessage> messages, @Nullable ProjectCodeSearch codeSearch)
+			throws IOException, InterruptedException {
+		JsonArray requestMessages = new JsonArray();
+		for (AiChatMessage m : messages) {
+			requestMessages.add(toMessageJson(m));
+		}
+		JsonArray tools = codeSearch != null ? buildToolsDefinition() : null;
+		for (int round = 0; round < MAX_TOOL_ROUNDS; round++) {
+			JsonObject responseMessage = sendRaw(requestMessages, tools);
+			JsonArray toolCalls = responseMessage.has("tool_calls") && responseMessage.get("tool_calls").isJsonArray()
+					? responseMessage.getAsJsonArray("tool_calls")
+					: null;
+			if (toolCalls == null || toolCalls.isEmpty()) {
+				return textOf(responseMessage);
+			}
+			requestMessages.add(responseMessage);
+			for (JsonElement tcEl : toolCalls) {
+				JsonObject toolCall = tcEl.getAsJsonObject();
+				String id = toolCall.get("id").getAsString();
+				JsonObject fn = toolCall.getAsJsonObject("function");
+				String name = fn.get("name").getAsString();
+				String argumentsJson = fn.has("arguments") ? fn.get("arguments").getAsString() : "{}";
+				String toolResult = executeTool(name, argumentsJson, codeSearch);
+
+				JsonObject toolMsg = new JsonObject();
+				toolMsg.addProperty("role", "tool");
+				toolMsg.addProperty("tool_call_id", id);
+				toolMsg.addProperty("content", toolResult);
+				requestMessages.add(toolMsg);
+			}
+		}
+		throw new IOException("AI Assistant: gave up after " + MAX_TOOL_ROUNDS + " tool-call rounds without a final answer");
+	}
+
+	private static String executeTool(String name, String argumentsJson, @Nullable ProjectCodeSearch codeSearch) {
+		if (!"search_code".equals(name) || codeSearch == null) {
+			return "Tool not available: " + name;
+		}
+		try {
+			JsonObject args = GSON.fromJson(argumentsJson, JsonObject.class);
+			String query = args != null && args.has("query") ? args.get("query").getAsString() : "";
+			return codeSearch.search(query, MAX_SEARCH_MATCHES);
+		} catch (Exception e) {
+			LOG.warn("search_code tool call failed", e);
+			return "search_code failed: " + e.getMessage();
+		}
+	}
+
+	private static JsonArray buildToolsDefinition() {
+		JsonObject queryProp = new JsonObject();
+		queryProp.addProperty("type", "string");
+		queryProp.addProperty("description", "Text to search for (case-insensitive) in the decompiled Java source code");
+
+		JsonObject props = new JsonObject();
+		props.add("query", queryProp);
+
+		JsonArray required = new JsonArray();
+		required.add("query");
+
+		JsonObject params = new JsonObject();
+		params.addProperty("type", "object");
+		params.add("properties", props);
+		params.add("required", required);
+
+		JsonObject function = new JsonObject();
+		function.addProperty("name", "search_code");
+		function.addProperty("description",
+				"Search the decompiled Android app's source code for a text string. Use this whenever the user "
+						+ "asks about specific behavior, classes, permissions or APIs used in the app they are "
+						+ "reverse-engineering, instead of guessing from general knowledge. Returns matching class "
+						+ "names with a short code snippet around each match. Call it again with a different query "
+						+ "if the first search doesn't find what you need.");
+		function.add("parameters", params);
+
+		JsonObject tool = new JsonObject();
+		tool.addProperty("type", "function");
+		tool.add("function", function);
+
+		JsonArray tools = new JsonArray();
+		tools.add(tool);
+		return tools;
+	}
+
+	private static JsonObject toMessageJson(AiChatMessage m) {
+		JsonObject obj = new JsonObject();
+		obj.addProperty("role", m.getRole());
+		obj.addProperty("content", m.getContent());
+		return obj;
+	}
+
+	private static String textOf(JsonObject message) {
+		JsonElement content = message.get("content");
+		return content != null && !content.isJsonNull() ? content.getAsString() : "";
+	}
+
+	private JsonObject sendRaw(JsonArray messages, @Nullable JsonArray tools) throws IOException, InterruptedException {
 		String baseUrl = trimTrailingSlash(settings.getBaseUrl());
 		if (baseUrl.isEmpty()) {
 			throw new JadxRuntimeException("AI Assistant: base URL is not set");
@@ -67,19 +180,20 @@ public class AiClient {
 		}
 		String url = baseUrl + "/chat/completions";
 
-		ChatRequest chatRequest = new ChatRequest();
-		chatRequest.model = settings.getModel();
-		chatRequest.messages = messages.stream()
-				.map(m -> new ChatRequestMessage(m.getRole(), m.getContent()))
-				.collect(Collectors.toList());
-		String requestBody = GSON.toJson(chatRequest);
+		JsonObject requestBody = new JsonObject();
+		requestBody.addProperty("model", settings.getModel());
+		requestBody.add("messages", messages);
+		requestBody.addProperty("stream", false);
+		if (tools != null && !tools.isEmpty()) {
+			requestBody.add("tools", tools);
+		}
 
 		HttpRequest request = HttpRequest.newBuilder()
 				.uri(URI.create(url))
 				.timeout(TIMEOUT)
 				.header("Content-Type", "application/json")
 				.header("Authorization", "Bearer " + settings.getApiKey())
-				.POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
+				.POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(requestBody), StandardCharsets.UTF_8))
 				.build();
 
 		HttpClient client = buildHttpClient();
@@ -89,7 +203,7 @@ public class AiClient {
 		if (status < 200 || status >= 300) {
 			throw new IOException("AI request failed with HTTP " + status + ": " + shorten(body));
 		}
-		return parseResponse(body);
+		return extractMessage(body);
 	}
 
 	private static String shorten(@Nullable String s) {
@@ -99,21 +213,21 @@ public class AiClient {
 		return s.length() > 500 ? s.substring(0, 500) + "..." : s;
 	}
 
-	private String parseResponse(String body) throws IOException {
+	private static JsonObject extractMessage(String body) throws IOException {
 		try {
 			JsonObject root = GSON.fromJson(body, JsonObject.class);
 			if (root.has("error")) {
 				throw new IOException("AI API error: " + root.get("error").toString());
 			}
-			var choices = root.getAsJsonArray("choices");
+			JsonArray choices = root.getAsJsonArray("choices");
 			if (choices == null || choices.isEmpty()) {
 				throw new IOException("AI response has no choices: " + shorten(body));
 			}
 			JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
-			if (message == null || !message.has("content")) {
-				throw new IOException("AI response message has no content: " + shorten(body));
+			if (message == null) {
+				throw new IOException("AI response has no message: " + shorten(body));
 			}
-			return message.get("content").getAsString();
+			return message;
 		} catch (IOException e) {
 			throw e;
 		} catch (Exception e) {
@@ -291,23 +405,6 @@ public class AiClient {
 				result.addAll(List.of(delegate.getAcceptedIssuers()));
 			}
 			return result.toArray(new X509Certificate[0]);
-		}
-	}
-
-	private static final class ChatRequest {
-		String model;
-		List<ChatRequestMessage> messages;
-		@SerializedName("stream")
-		final boolean stream = false;
-	}
-
-	private static final class ChatRequestMessage {
-		final String role;
-		final String content;
-
-		private ChatRequestMessage(String role, String content) {
-			this.role = role;
-			this.content = content;
 		}
 	}
 }
