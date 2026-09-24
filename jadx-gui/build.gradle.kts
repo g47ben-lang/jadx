@@ -194,12 +194,19 @@ fun escapeJVMOptions(): List<String> =
 runtime {
 	addOptions("--strip-debug", "--no-header-files", "--no-man-pages")
 	addModules(
-		"java.desktop",
-		"java.naming",
-		"java.xml",
-		// needed for "https" protocol to download plugins and updates
-		"jdk.crypto.cryptoki",
-		"jdk.accessibility",
+		*buildList {
+			add("java.desktop")
+			add("java.naming")
+			add("java.xml")
+			// needed for "https" protocol to download plugins and updates
+			add("jdk.crypto.cryptoki")
+			add("jdk.accessibility")
+			// needed to read the Windows certificate store (AI Assistant network-filter compatibility);
+			// this module only exists in Windows JDK builds, so it must not be requested elsewhere
+			if (DefaultNativePlatform.getCurrentOperatingSystem().isWindows) {
+				add("jdk.crypto.mscapi")
+			}
+		}.toTypedArray(),
 	)
 	jpackage {
 		val os = DefaultNativePlatform.getCurrentOperatingSystem()

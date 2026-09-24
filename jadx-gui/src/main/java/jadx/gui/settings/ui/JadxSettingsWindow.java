@@ -524,8 +524,9 @@ public class JadxSettingsWindow extends JDialog {
 						"Reply with just the word OK if you can read this.")));
 				resultText.set(reply);
 				success.set(true);
-			} catch (Exception e) {
-				resultText.set(e.getMessage());
+			} catch (Throwable e) {
+				LOG.warn("AI test connection failed", e);
+				resultText.set(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
 				success.set(false);
 			}
 		}, status -> {
