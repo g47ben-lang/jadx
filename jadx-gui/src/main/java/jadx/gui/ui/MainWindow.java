@@ -164,6 +164,7 @@ import jadx.gui.ui.panel.IssuesPanel;
 import jadx.gui.ui.panel.JDebuggerPanel;
 import jadx.gui.ui.panel.ProgressPanel;
 import jadx.gui.ui.popupmenu.RecentProjectsMenuListener;
+import jadx.gui.ui.rebuild.RebuildApkDialog;
 import jadx.gui.ui.startpage.StartPageNode;
 import jadx.gui.ui.tab.EditorSyncManager;
 import jadx.gui.ui.tab.NavigationController;
@@ -1213,6 +1214,8 @@ public class MainWindow extends JFrame implements IMainWindow {
 				() -> new ADBDialog(MainWindow.this).setVisible(true));
 		JadxGuiAction aiAssistantAction = new JadxGuiAction(ActionModel.AI_ASSISTANT,
 				() -> AiAssistantDialog.open(MainWindow.this));
+		JadxGuiAction rebuildApkAction = new JadxGuiAction(ActionModel.REBUILD_APK,
+				() -> RebuildApkDialog.open(MainWindow.this));
 
 		JMenu file = new JadxMenu(NLS.str("menu.file"), shortcutsController);
 		file.setMnemonic(KeyEvent.VK_F);
@@ -1273,6 +1276,7 @@ public class MainWindow extends JFrame implements IMainWindow {
 		tools.add(quarkAction);
 		tools.add(debuggerAction);
 		tools.add(aiAssistantAction);
+		tools.add(rebuildApkAction);
 
 		JMenu help = new JadxMenu(NLS.str("menu.help"), shortcutsController);
 		help.setMnemonic(KeyEvent.VK_H);

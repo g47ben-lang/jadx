@@ -17,6 +17,7 @@ import jadx.cli.LogHelper;
 import jadx.gui.ai.AiSettings;
 import jadx.gui.cache.code.CodeCacheMode;
 import jadx.gui.cache.usage.UsageCacheMode;
+import jadx.gui.rebuild.RebuildSettings;
 import jadx.gui.settings.data.SaveOptionEnum;
 import jadx.gui.ui.action.ActionModel;
 import jadx.gui.ui.tab.dnd.TabDndGhostType;
@@ -108,6 +109,7 @@ public class JadxSettingsData extends JadxGUIArgs {
 	private XposedCodegenLanguage xposedCodegenLanguage = XposedCodegenLanguage.JAVA;
 
 	private AiSettings aiSettings = new AiSettings();
+	private RebuildSettings rebuildSettings = new RebuildSettings();
 
 	private int treeWidth = 130;
 	private boolean dockLogViewer = true;
@@ -166,6 +168,14 @@ public class JadxSettingsData extends JadxGUIArgs {
 
 	public void setAiSettings(AiSettings aiSettings) {
 		this.aiSettings = aiSettings;
+	}
+
+	public RebuildSettings getRebuildSettings() {
+		return rebuildSettings;
+	}
+
+	public void setRebuildSettings(RebuildSettings rebuildSettings) {
+		this.rebuildSettings = rebuildSettings;
 	}
 
 	public @Nullable String getCacheDir() {
