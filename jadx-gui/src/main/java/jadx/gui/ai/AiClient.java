@@ -49,7 +49,7 @@ public class AiClient {
 	private static final Logger LOG = LoggerFactory.getLogger(AiClient.class);
 	private static final Gson GSON = new Gson();
 	private static final Duration TIMEOUT = Duration.ofSeconds(60);
-	private static final int MAX_TOOL_ROUNDS = 4;
+	private static final int MAX_TOOL_ROUNDS = 8;
 	private static final int MAX_SEARCH_MATCHES = 10;
 
 	private final AiSettings settings;
@@ -106,7 +106,11 @@ public class AiClient {
 				requestMessages.add(toolMsg);
 			}
 		}
-		throw new IOException("AI Assistant: gave up after " + MAX_TOOL_ROUNDS + " tool-call rounds without a final answer");
+		// out of rounds: force a plain text answer from whatever was found so far,
+		// instead of failing outright
+		requestMessages.add(toMessageJson(new AiChatMessage(AiChatMessage.ROLE_USER,
+				"Please give your best answer now based on what you've found so far, without calling any more tools.")));
+		return textOf(sendRaw(requestMessages, null));
 	}
 
 	private static String executeTool(String name, String argumentsJson, @Nullable ProjectCodeSearch codeSearch) {

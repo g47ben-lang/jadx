@@ -1,6 +1,7 @@
 package jadx.gui.ui.ai;
 
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
@@ -8,11 +9,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
-import javax.swing.BorderFactory;
 import javax.swing.JButton;
+import javax.swing.JEditorPane;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.JScrollBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
@@ -31,10 +31,18 @@ import jadx.gui.utils.NLS;
 public class AiAssistantPanel extends JPanel {
 	private static final long serialVersionUID = 1L;
 
+	private static final String USER_BG = "#DCEFFF";
+	private static final String USER_BORDER = "#4A90D9";
+	private static final String ASSISTANT_BG = "#F0F0F0";
+	private static final String ASSISTANT_BORDER = "#8A8A8A";
+	private static final String ERROR_BG = "#FBE1E1";
+	private static final String ERROR_BORDER = "#C0392B";
+
 	private final MainWindow mainWindow;
 	private final List<AiChatMessage> history = new ArrayList<>();
+	private final StringBuilder chatHtmlBody = new StringBuilder();
 
-	private JTextArea chatArea;
+	private JEditorPane chatPane;
 	private JTextArea inputArea;
 	private JButton sendBtn;
 
@@ -42,17 +50,17 @@ public class AiAssistantPanel extends JPanel {
 		this.mainWindow = mainWindow;
 		initUI();
 		if (!mainWindow.getSettings().getAiSettings().isEnabled()) {
-			chatArea.setText(NLS.str("ai_assistant.welcome_not_enabled") + "\n");
+			appendBlock(NLS.str("ai_assistant.welcome_not_enabled"), ASSISTANT_BG, ASSISTANT_BORDER, null);
 		}
 	}
 
 	private void initUI() {
-		chatArea = new JTextArea();
-		chatArea.setEditable(false);
-		chatArea.setLineWrap(true);
-		chatArea.setWrapStyleWord(true);
-		chatArea.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
-		JScrollPane chatScroll = new JScrollPane(chatArea);
+		chatPane = new JEditorPane();
+		chatPane.setContentType("text/html");
+		chatPane.setEditable(false);
+		chatPane.setBackground(Color.WHITE);
+		refreshChatPane();
+		JScrollPane chatScroll = new JScrollPane(chatPane);
 		chatScroll.setPreferredSize(new Dimension(500, 400));
 
 		inputArea = new JTextArea(4, 40);
@@ -100,7 +108,8 @@ public class AiAssistantPanel extends JPanel {
 
 	public void clear() {
 		history.clear();
-		chatArea.setText("");
+		chatHtmlBody.setLength(0);
+		refreshChatPane();
 	}
 
 	/**
@@ -124,7 +133,7 @@ public class AiAssistantPanel extends JPanel {
 			return;
 		}
 		inputArea.setText("");
-		appendLine(NLS.str("ai_assistant.you") + ":\n" + text + "\n");
+		appendBlock(text, USER_BG, USER_BORDER, NLS.str("ai_assistant.you"));
 		history.add(new AiChatMessage(AiChatMessage.ROLE_USER, text));
 		setBusy(true);
 
@@ -153,9 +162,9 @@ public class AiAssistantPanel extends JPanel {
 			if (Boolean.TRUE.equals(success.get())) {
 				String reply = resultText.get();
 				history.add(new AiChatMessage(AiChatMessage.ROLE_ASSISTANT, reply));
-				appendLine(NLS.str("ai_assistant.assistant") + ":\n" + reply + "\n");
+				appendBlock(reply, ASSISTANT_BG, ASSISTANT_BORDER, NLS.str("ai_assistant.assistant"));
 			} else {
-				appendLine(NLS.str("ai_assistant.error") + ": " + resultText.get() + "\n");
+				appendBlock(resultText.get(), ERROR_BG, ERROR_BORDER, NLS.str("ai_assistant.error"));
 			}
 		});
 	}
@@ -165,11 +174,62 @@ public class AiAssistantPanel extends JPanel {
 		inputArea.setEnabled(!busy);
 	}
 
-	private void appendLine(String line) {
-		chatArea.append(line + "\n");
-		SwingUtilities.invokeLater(() -> {
-			JScrollBar bar = ((JScrollPane) chatArea.getParent().getParent()).getVerticalScrollBar();
-			bar.setValue(bar.getMaximum());
-		});
+	/**
+	 * Appends one chat bubble (right-aligned, RTL-aware) with a bold role label and
+	 * lightweight markdown rendering (bold, inline code, fenced code blocks).
+	 */
+	private void appendBlock(String text, String background, String borderColor, String label) {
+		chatHtmlBody.append("<div style=\"direction:rtl; text-align:right; background:")
+				.append(background)
+				.append("; border-right:4px solid ")
+				.append(borderColor)
+				.append("; margin:8px 4px; padding:8px 12px;\">");
+		if (label != null) {
+			chatHtmlBody.append("<b>").append(escapeHtml(label)).append("</b><br>");
+		}
+		chatHtmlBody.append(formatMessageHtml(text));
+		chatHtmlBody.append("</div>");
+		refreshChatPane();
+	}
+
+	private void refreshChatPane() {
+		String html = "<html><body style=\"direction:rtl; font-family:sans-serif; font-size:12px; margin:0;\">"
+				+ chatHtmlBody
+				+ "</body></html>";
+		chatPane.setText(html);
+		SwingUtilities.invokeLater(() -> chatPane.setCaretPosition(chatPane.getDocument().getLength()));
+	}
+
+	private static String formatMessageHtml(String text) {
+		StringBuilder html = new StringBuilder();
+		boolean inCodeBlock = false;
+		for (String line : text.split("\n", -1)) {
+			if (line.strip().startsWith("```")) {
+				if (!inCodeBlock) {
+					inCodeBlock = true;
+					html.append("<pre style=\"direction:ltr; text-align:left; background:#00000012; "
+							+ "padding:6px; white-space:pre-wrap; font-family:monospace;\">");
+				} else {
+					inCodeBlock = false;
+					html.append("</pre>");
+				}
+				continue;
+			}
+			if (inCodeBlock) {
+				html.append(escapeHtml(line)).append('\n');
+			} else {
+				html.append(formatInline(escapeHtml(line))).append("<br>");
+			}
+		}
+		return html.toString();
+	}
+
+	private static String formatInline(String escapedLine) {
+		String result = escapedLine.replaceAll("\\*\\*(.+?)\\*\\*", "<b>$1</b>");
+		return result.replaceAll("`([^`]+?)`", "<code style=\"direction:ltr; unicode-bidi:embed;\">$1</code>");
+	}
+
+	private static String escapeHtml(String s) {
+		return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
 	}
 }
