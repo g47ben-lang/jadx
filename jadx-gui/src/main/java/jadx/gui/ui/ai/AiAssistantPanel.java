@@ -5,12 +5,18 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.swing.JButton;
 import javax.swing.JEditorPane;
+import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -20,9 +26,12 @@ import javax.swing.SwingUtilities;
 import jadx.gui.ai.AiChatMessage;
 import jadx.gui.ai.AiClient;
 import jadx.gui.ai.AiSettings;
+import jadx.gui.ai.ProjectCodeExporter;
 import jadx.gui.ai.ProjectCodeSearch;
 import jadx.gui.ai.ProjectFileOpener;
 import jadx.gui.ui.MainWindow;
+import jadx.gui.ui.filedialog.FileDialogWrapper;
+import jadx.gui.ui.filedialog.FileOpenMode;
 import jadx.gui.utils.NLS;
 
 /**
@@ -39,13 +48,23 @@ public class AiAssistantPanel extends JPanel {
 	private static final String ERROR_BG = "#FBE1E1";
 	private static final String ERROR_BORDER = "#C0392B";
 
+	/**
+	 * Safety cap (characters, roughly 4 chars/token) on how much of the project code dump gets
+	 * attached to the chat automatically. Past this the dump is truncated with a notice - the AI
+	 * still has search_code/open_file to look at anything that got cut. The full, untruncated dump
+	 * is always available via the manual "Export all code" button regardless of this limit.
+	 */
+	private static final int MAX_AUTO_CONTEXT_CHARS = 300_000;
+
 	private final MainWindow mainWindow;
 	private final List<AiChatMessage> history = new ArrayList<>();
 	private final StringBuilder chatHtmlBody = new StringBuilder();
+	private boolean codeDumpAttached = false;
 
 	private JEditorPane chatPane;
 	private JTextArea inputArea;
 	private JButton sendBtn;
+	private JButton exportBtn;
 
 	public AiAssistantPanel(MainWindow mainWindow) {
 		this.mainWindow = mainWindow;
@@ -92,9 +111,12 @@ public class AiAssistantPanel extends JPanel {
 		clearBtn.addActionListener(ev -> clear());
 		JButton connectBtn = new JButton(NLS.str("ai_assistant.connect_provider"));
 		connectBtn.addActionListener(ev -> mainWindow.openSettings(NLS.str("preferences.ai")));
+		exportBtn = new JButton(NLS.str("ai_assistant.export_code"));
+		exportBtn.addActionListener(ev -> exportProjectCode());
 
 		JPanel buttonsPanel = new JPanel();
 		buttonsPanel.add(connectBtn);
+		buttonsPanel.add(exportBtn);
 		buttonsPanel.add(clearBtn);
 		buttonsPanel.add(sendBtn);
 
@@ -109,8 +131,62 @@ public class AiAssistantPanel extends JPanel {
 
 	public void clear() {
 		history.clear();
+		codeDumpAttached = false;
 		chatHtmlBody.setLength(0);
 		refreshChatPane();
+	}
+
+	/**
+	 * Builds the full project code dump (AndroidManifest.xml + every decompiled class) and lets
+	 * the user save it to a .txt file, to paste into an external AI tool (Claude, ChatGPT, ...)
+	 * themselves - independent of whether the AI Assistant itself is configured/enabled.
+	 */
+	private void exportProjectCode() {
+		setBusy(true);
+		AtomicReference<String> dump = new AtomicReference<>();
+		AtomicReference<String> error = new AtomicReference<>();
+		mainWindow.getBackgroundExecutor().execute(NLS.str("ai_assistant.exporting"), () -> {
+			try {
+				dump.set(new ProjectCodeExporter(mainWindow).exportAll());
+			} catch (Throwable e) {
+				error.set(e.getMessage() != null ? e.getMessage() : e.toString());
+			}
+		}, status -> {
+			setBusy(false);
+			if (error.get() != null) {
+				JOptionPane.showMessageDialog(this, error.get(),
+						NLS.str("ai_assistant.export_code.failed"), JOptionPane.ERROR_MESSAGE);
+			} else {
+				saveExportedCode(dump.get());
+			}
+		});
+	}
+
+	private void saveExportedCode(String content) {
+		FileDialogWrapper fileDialog = new FileDialogWrapper(mainWindow, FileOpenMode.CUSTOM_SAVE);
+		fileDialog.setTitle(NLS.str("ai_assistant.export_code"));
+		Path currentDir = fileDialog.getCurrentDir();
+		if (currentDir != null) {
+			fileDialog.setSelectedFile(currentDir.resolve("project_code.txt"));
+		}
+		fileDialog.setFileExtList(List.of("txt"));
+		fileDialog.setSelectionMode(JFileChooser.FILES_ONLY);
+		List<Path> paths = fileDialog.show();
+		if (paths.size() != 1) {
+			return;
+		}
+		Path path = paths.get(0);
+		if (!path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".txt")) {
+			path = path.resolveSibling(path.getFileName() + ".txt");
+		}
+		try {
+			Files.writeString(path, content, StandardCharsets.UTF_8);
+			JOptionPane.showMessageDialog(this, NLS.str("ai_assistant.export_code.success", path.toString()),
+					NLS.str("ai_assistant.export_code"), JOptionPane.INFORMATION_MESSAGE);
+		} catch (IOException e) {
+			JOptionPane.showMessageDialog(this, e.getMessage(),
+					NLS.str("ai_assistant.export_code.failed"), JOptionPane.ERROR_MESSAGE);
+		}
 	}
 
 	/**
@@ -142,15 +218,18 @@ public class AiAssistantPanel extends JPanel {
 		AtomicReference<Boolean> success = new AtomicReference<>(false);
 		mainWindow.getBackgroundExecutor().execute(NLS.str("ai_assistant.thinking"), () -> {
 			try {
+				attachCodeDumpIfNeeded();
 				List<AiChatMessage> request = new ArrayList<>();
 				request.add(new AiChatMessage(AiChatMessage.ROLE_SYSTEM,
 						"You are an assistant embedded in the jadx Android decompiler GUI, helping the user "
-								+ "understand a specific decompiled Android app. You have a search_code tool that "
-								+ "searches the actual decompiled source of the app currently open in jadx, and an "
-								+ "open_file tool that opens a class or resource for the user directly in jadx. Use "
-								+ "search_code whenever the question is about what this particular app does, rather "
-								+ "than answering only from general Android knowledge, and use open_file when the "
-								+ "user would benefit from looking at a file you found themselves. Be concise."));
+								+ "understand a specific decompiled Android app. The full source code of the project "
+								+ "currently open in jadx (AndroidManifest.xml and every decompiled class, labeled by "
+								+ "file path) has already been given to you as an earlier message in this "
+								+ "conversation - refer to it directly instead of guessing from general Android "
+								+ "knowledge or asking the user to paste code. You also have a search_code tool to "
+								+ "search that same source again if useful, and an open_file tool that opens a class "
+								+ "or resource for the user directly in jadx - use it when the user would benefit "
+								+ "from looking at a file you found themselves. Be concise."));
 				request.addAll(history);
 				String reply = AiClient.askWithToolsAndFailover(settings, request,
 						new ProjectCodeSearch(mainWindow), new ProjectFileOpener(mainWindow));
@@ -172,8 +251,32 @@ public class AiAssistantPanel extends JPanel {
 		});
 	}
 
+	/**
+	 * Builds the full project code dump once per chat session (until {@link #clear()}) and
+	 * inserts it as the first message in {@code history}, before the very first user question,
+	 * so every request from then on sends it as part of the conversation automatically.
+	 * Must be called from the background thread that's about to send a request - decompiling the
+	 * whole project can take a while.
+	 */
+	private void attachCodeDumpIfNeeded() {
+		if (codeDumpAttached) {
+			return;
+		}
+		String dump = new ProjectCodeExporter(mainWindow).exportAll();
+		if (dump.length() > MAX_AUTO_CONTEXT_CHARS) {
+			dump = dump.substring(0, MAX_AUTO_CONTEXT_CHARS)
+					+ "\n\n... (truncated, the project is too large to include in full here - "
+					+ "use the search_code/open_file tools for anything not shown above)";
+		}
+		history.add(0, new AiChatMessage(AiChatMessage.ROLE_USER,
+				"Here is the full source code of the Android project currently open in jadx, "
+						+ "organized by file path:\n\n" + dump));
+		codeDumpAttached = true;
+	}
+
 	private void setBusy(boolean busy) {
 		sendBtn.setEnabled(!busy);
+		exportBtn.setEnabled(!busy);
 		inputArea.setEnabled(!busy);
 	}
 
