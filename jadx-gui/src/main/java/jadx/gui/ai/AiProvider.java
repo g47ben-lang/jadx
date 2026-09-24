@@ -2,7 +2,8 @@ package jadx.gui.ai;
 
 /**
  * Preset AI providers exposing an OpenAI-compatible "chat/completions" endpoint.
- * {@link #CUSTOM} allows pointing to any other compatible endpoint (local models, other clouds, ...).
+ * {@link #CUSTOM} allows pointing to any other compatible endpoint (local models, other clouds,
+ * ...).
  */
 public enum AiProvider {
 	GEMINI("Gemini (Google AI Studio)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash",

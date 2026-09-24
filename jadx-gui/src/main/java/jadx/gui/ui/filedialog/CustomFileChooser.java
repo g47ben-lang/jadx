@@ -72,7 +72,8 @@ class CustomFileChooser extends JFileChooser {
 		if (data.isOpen()) {
 			installFileListPasteAction(this);
 		}
-		// the filename field doesn't get focus by default, so a path can't be pasted right after the dialog opens
+		// the filename field doesn't get focus by default, so a path can't be pasted right after the dialog
+		// opens
 		focusFileNameField(this);
 		MainWindow mainWindow = data.getMainWindow();
 		int ret = data.isOpen() ? showOpenDialog(mainWindow) : showSaveDialog(mainWindow);
