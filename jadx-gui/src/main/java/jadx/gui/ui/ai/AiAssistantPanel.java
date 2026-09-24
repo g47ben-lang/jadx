@@ -309,11 +309,14 @@ public class AiAssistantPanel extends JPanel {
 	private static String formatMessageHtml(String text) {
 		StringBuilder html = new StringBuilder();
 		boolean inCodeBlock = false;
+		boolean inList = false;
 		for (String line : text.split("\n", -1)) {
-			if (line.strip().startsWith("```")) {
+			String trimmed = line.strip();
+			if (trimmed.startsWith("```")) {
+				inList = closeList(html, inList);
 				if (!inCodeBlock) {
 					inCodeBlock = true;
-					html.append("<pre style=\"direction:ltr; text-align:left; background:#00000012; "
+					html.append("<pre style=\"direction:ltr; text-align:left; background:#E4E4E4; color:#000000; "
 							+ "padding:6px; white-space:pre-wrap; font-family:monospace;\">");
 				} else {
 					inCodeBlock = false;
@@ -323,11 +326,48 @@ public class AiAssistantPanel extends JPanel {
 			}
 			if (inCodeBlock) {
 				html.append(escapeHtml(line)).append('\n');
-			} else {
-				html.append(formatInline(escapeHtml(line))).append("<br>");
+				continue;
 			}
+			if (trimmed.equals("---") || trimmed.equals("***") || trimmed.equals("___")) {
+				inList = closeList(html, inList);
+				html.append("<hr>");
+				continue;
+			}
+			int headerLevel = 0;
+			while (headerLevel < trimmed.length() && trimmed.charAt(headerLevel) == '#') {
+				headerLevel++;
+			}
+			if (headerLevel > 0 && headerLevel <= 6 && trimmed.length() > headerLevel && trimmed.charAt(headerLevel) == ' ') {
+				inList = closeList(html, inList);
+				String headerText = trimmed.substring(headerLevel + 1).strip();
+				html.append("<b style=\"font-size:").append(Math.max(100, 130 - headerLevel * 8)).append("%;\">")
+						.append(formatInline(escapeHtml(headerText)))
+						.append("</b><br>");
+				continue;
+			}
+			if (trimmed.startsWith("* ") || trimmed.startsWith("- ")) {
+				if (!inList) {
+					html.append("<ul style=\"margin:2px 0;\">");
+					inList = true;
+				}
+				html.append("<li>").append(formatInline(escapeHtml(trimmed.substring(2)))).append("</li>");
+				continue;
+			}
+			inList = closeList(html, inList);
+			html.append(formatInline(escapeHtml(line))).append("<br>");
+		}
+		closeList(html, inList);
+		if (inCodeBlock) {
+			html.append("</pre>");
 		}
 		return html.toString();
+	}
+
+	private static boolean closeList(StringBuilder html, boolean inList) {
+		if (inList) {
+			html.append("</ul>");
+		}
+		return false;
 	}
 
 	private static String formatInline(String escapedLine) {
