@@ -6,7 +6,7 @@ package jadx.gui.ai;
  * ...).
  */
 public enum AiProvider {
-	GEMINI("Gemini (Google AI Studio)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash",
+	GEMINI("Gemini (Google AI Studio)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash",
 			"https://aistudio.google.com/apikey"),
 	OPENAI("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini", "https://platform.openai.com/api-keys"),
 	CUSTOM("Custom / OpenAI-compatible", "", "", null);
