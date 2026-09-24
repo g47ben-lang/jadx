@@ -53,13 +53,48 @@ public class AiClient {
 	private static final int MAX_SEARCH_MATCHES = 10;
 
 	private final AiSettings settings;
+	private final AiKeyProfile profile;
 
-	public AiClient(AiSettings settings) {
+	public AiClient(AiSettings settings, AiKeyProfile profile) {
 		this.settings = settings;
+		this.profile = profile;
 	}
 
 	/**
-	 * Simple one-shot request with no tool use.
+	 * Runs {@link #askWithTools} against the settings' active profile, automatically retrying with
+	 * the next profile (wrapping around) when a profile is rejected for being out of quota or
+	 * invalid (HTTP 401/403/429). Any other failure (network, bad model name, ...) is not retried,
+	 * since switching keys wouldn't fix it.
+	 * Blocking call, must be executed on a background thread.
+	 */
+	public static String askWithToolsAndFailover(AiSettings settings, List<AiChatMessage> messages,
+			@Nullable ProjectCodeSearch codeSearch, @Nullable ProjectFileOpener fileOpener)
+			throws IOException, InterruptedException {
+		List<AiKeyProfile> profiles = settings.getProfiles();
+		if (profiles.isEmpty()) {
+			throw new JadxRuntimeException("AI Assistant: no API key configured");
+		}
+		int start = Math.max(0, Math.min(settings.getActiveProfileIndex(), profiles.size() - 1));
+		IOException lastError = null;
+		for (int i = 0; i < profiles.size(); i++) {
+			AiKeyProfile candidate = profiles.get((start + i) % profiles.size());
+			try {
+				return new AiClient(settings, candidate).askWithTools(messages, codeSearch, fileOpener);
+			} catch (AiHttpException e) {
+				lastError = e;
+				if (e.status == 401 || e.status == 403 || e.status == 429) {
+					LOG.warn("AI profile '{}' failed with HTTP {}, trying next profile", candidate.getDisplayLabel(), e.status);
+					continue;
+				}
+				throw e;
+			}
+		}
+		throw lastError;
+	}
+
+	/**
+	 * Simple one-shot request with no tool use, against this client's specific profile (no failover
+	 * - used for the "test connection" button, which is testing one profile on purpose).
 	 * Blocking call, must be executed on a background thread.
 	 */
 	public String sendMessage(List<AiChatMessage> messages) throws IOException, InterruptedException {
@@ -75,13 +110,13 @@ public class AiClient {
 	 * actual decompiled project before answering.
 	 * Blocking call, must be executed on a background thread.
 	 */
-	public String askWithTools(List<AiChatMessage> messages, @Nullable ProjectCodeSearch codeSearch)
-			throws IOException, InterruptedException {
+	public String askWithTools(List<AiChatMessage> messages, @Nullable ProjectCodeSearch codeSearch,
+			@Nullable ProjectFileOpener fileOpener) throws IOException, InterruptedException {
 		JsonArray requestMessages = new JsonArray();
 		for (AiChatMessage m : messages) {
 			requestMessages.add(toMessageJson(m));
 		}
-		JsonArray tools = codeSearch != null ? buildToolsDefinition() : null;
+		JsonArray tools = buildToolsDefinition(codeSearch != null, fileOpener != null);
 		for (int round = 0; round < MAX_TOOL_ROUNDS; round++) {
 			JsonObject responseMessage = sendRaw(requestMessages, tools);
 			JsonArray toolCalls = responseMessage.has("tool_calls") && responseMessage.get("tool_calls").isJsonArray()
@@ -97,7 +132,7 @@ public class AiClient {
 				JsonObject fn = toolCall.getAsJsonObject("function");
 				String name = fn.get("name").getAsString();
 				String argumentsJson = fn.has("arguments") ? fn.get("arguments").getAsString() : "{}";
-				String toolResult = executeTool(name, argumentsJson, codeSearch);
+				String toolResult = executeTool(name, argumentsJson, codeSearch, fileOpener);
 
 				JsonObject toolMsg = new JsonObject();
 				toolMsg.addProperty("role", "tool");
@@ -113,53 +148,88 @@ public class AiClient {
 		return textOf(sendRaw(requestMessages, null));
 	}
 
-	private static String executeTool(String name, String argumentsJson, @Nullable ProjectCodeSearch codeSearch) {
-		if (!"search_code".equals(name) || codeSearch == null) {
-			return "Tool not available: " + name;
-		}
+	private static String executeTool(String name, String argumentsJson, @Nullable ProjectCodeSearch codeSearch,
+			@Nullable ProjectFileOpener fileOpener) {
 		try {
 			JsonObject args = GSON.fromJson(argumentsJson, JsonObject.class);
-			String query = args != null && args.has("query") ? args.get("query").getAsString() : "";
-			return codeSearch.search(query, MAX_SEARCH_MATCHES);
+			if ("search_code".equals(name) && codeSearch != null) {
+				String query = args != null && args.has("query") ? args.get("query").getAsString() : "";
+				return codeSearch.search(query, MAX_SEARCH_MATCHES);
+			}
+			if ("open_file".equals(name) && fileOpener != null) {
+				String fileName = args != null && args.has("name") ? args.get("name").getAsString() : "";
+				return fileOpener.open(fileName);
+			}
+			return "Tool not available: " + name;
 		} catch (Exception e) {
-			LOG.warn("search_code tool call failed", e);
-			return "search_code failed: " + e.getMessage();
+			LOG.warn("{} tool call failed", name, e);
+			return name + " failed: " + e.getMessage();
 		}
 	}
 
-	private static JsonArray buildToolsDefinition() {
-		JsonObject queryProp = new JsonObject();
-		queryProp.addProperty("type", "string");
-		queryProp.addProperty("description", "Text to search for (case-insensitive) in the decompiled Java source code");
-
-		JsonObject props = new JsonObject();
-		props.add("query", queryProp);
-
-		JsonArray required = new JsonArray();
-		required.add("query");
-
-		JsonObject params = new JsonObject();
-		params.addProperty("type", "object");
-		params.add("properties", props);
-		params.add("required", required);
-
-		JsonObject function = new JsonObject();
-		function.addProperty("name", "search_code");
-		function.addProperty("description",
-				"Search the decompiled Android app's source code for a text string. Use this whenever the user "
-						+ "asks about specific behavior, classes, permissions or APIs used in the app they are "
-						+ "reverse-engineering, instead of guessing from general knowledge. Returns matching class "
-						+ "names with a short code snippet around each match. Call it again with a different query "
-						+ "if the first search doesn't find what you need.");
-		function.add("parameters", params);
-
-		JsonObject tool = new JsonObject();
-		tool.addProperty("type", "function");
-		tool.add("function", function);
-
+	private static JsonArray buildToolsDefinition(boolean includeCodeSearch, boolean includeFileOpener) {
 		JsonArray tools = new JsonArray();
-		tools.add(tool);
-		return tools;
+		if (includeCodeSearch) {
+			JsonObject queryProp = new JsonObject();
+			queryProp.addProperty("type", "string");
+			queryProp.addProperty("description", "Text to search for (case-insensitive) in the decompiled Java source code");
+
+			JsonObject props = new JsonObject();
+			props.add("query", queryProp);
+
+			JsonArray required = new JsonArray();
+			required.add("query");
+
+			JsonObject params = new JsonObject();
+			params.addProperty("type", "object");
+			params.add("properties", props);
+			params.add("required", required);
+
+			JsonObject function = new JsonObject();
+			function.addProperty("name", "search_code");
+			function.addProperty("description",
+					"Search the decompiled Android app's source code for a text string. Use this whenever the user "
+							+ "asks about specific behavior, classes, permissions or APIs used in the app they are "
+							+ "reverse-engineering, instead of guessing from general knowledge. Returns matching class "
+							+ "names with a short code snippet around each match. Call it again with a different query "
+							+ "if the first search doesn't find what you need.");
+			function.add("parameters", params);
+
+			JsonObject tool = new JsonObject();
+			tool.addProperty("type", "function");
+			tool.add("function", function);
+			tools.add(tool);
+		}
+		if (includeFileOpener) {
+			JsonObject nameProp = new JsonObject();
+			nameProp.addProperty("type", "string");
+			nameProp.addProperty("description", "Class name (full or simple) or resource file name to open");
+
+			JsonObject props = new JsonObject();
+			props.add("name", nameProp);
+
+			JsonArray required = new JsonArray();
+			required.add("name");
+
+			JsonObject params = new JsonObject();
+			params.addProperty("type", "object");
+			params.add("properties", props);
+			params.add("required", required);
+
+			JsonObject function = new JsonObject();
+			function.addProperty("name", "open_file");
+			function.addProperty("description",
+					"Open a class or resource file (e.g. AndroidManifest.xml, a specific class you found) directly "
+							+ "in the jadx GUI so the user can look at it themselves. Use this after finding something "
+							+ "relevant with search_code that the user would want to see in full.");
+			function.add("parameters", params);
+
+			JsonObject tool = new JsonObject();
+			tool.addProperty("type", "function");
+			tool.add("function", function);
+			tools.add(tool);
+		}
+		return tools.isEmpty() ? null : tools;
 	}
 
 	private static JsonObject toMessageJson(AiChatMessage m) {
@@ -175,17 +245,17 @@ public class AiClient {
 	}
 
 	private JsonObject sendRaw(JsonArray messages, @Nullable JsonArray tools) throws IOException, InterruptedException {
-		String baseUrl = trimTrailingSlash(settings.getBaseUrl());
+		String baseUrl = trimTrailingSlash(profile.getBaseUrl());
 		if (baseUrl.isEmpty()) {
 			throw new JadxRuntimeException("AI Assistant: base URL is not set");
 		}
-		if (settings.getApiKey().isEmpty()) {
+		if (profile.getApiKey().isEmpty()) {
 			throw new JadxRuntimeException("AI Assistant: API key is not set");
 		}
 		String url = baseUrl + "/chat/completions";
 
 		JsonObject requestBody = new JsonObject();
-		requestBody.addProperty("model", settings.getModel());
+		requestBody.addProperty("model", profile.getModel());
 		requestBody.add("messages", messages);
 		requestBody.addProperty("stream", false);
 		if (tools != null && !tools.isEmpty()) {
@@ -196,7 +266,7 @@ public class AiClient {
 				.uri(URI.create(url))
 				.timeout(TIMEOUT)
 				.header("Content-Type", "application/json")
-				.header("Authorization", "Bearer " + settings.getApiKey())
+				.header("Authorization", "Bearer " + profile.getApiKey())
 				.POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(requestBody), StandardCharsets.UTF_8))
 				.build();
 
@@ -205,9 +275,19 @@ public class AiClient {
 		int status = response.statusCode();
 		String body = response.body();
 		if (status < 200 || status >= 300) {
-			throw new IOException("AI request failed with HTTP " + status + ": " + shorten(body));
+			throw new AiHttpException(status, "AI request failed with HTTP " + status + ": " + shorten(body));
 		}
 		return extractMessage(body);
+	}
+
+	/** Carries the HTTP status code so failover can tell an auth/quota failure from any other error. */
+	public static final class AiHttpException extends IOException {
+		public final int status;
+
+		public AiHttpException(int status, String message) {
+			super(message);
+			this.status = status;
+		}
 	}
 
 	private static String shorten(@Nullable String s) {

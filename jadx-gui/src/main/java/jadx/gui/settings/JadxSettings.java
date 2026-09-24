@@ -84,6 +84,7 @@ public class JadxSettings {
 		// update custom fields
 		shortcutsWrapper.updateShortcuts(settingsData.getShortcuts());
 		fontSettings.bindData(settingsData);
+		settingsData.getAiSettings().migrateLegacyIfNeeded();
 	}
 
 	private void upgradeSettings(int fromVersion) {
