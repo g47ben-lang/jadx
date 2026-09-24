@@ -201,6 +201,8 @@ runtime {
 			// needed for "https" protocol to download plugins and updates
 			add("jdk.crypto.cryptoki")
 			add("jdk.accessibility")
+			// needed for java.net.http.HttpClient, used by the AI Assistant
+			add("java.net.http")
 			// needed to read the Windows certificate store (AI Assistant network-filter compatibility);
 			// this module only exists in Windows JDK builds, so it must not be requested elsewhere
 			if (DefaultNativePlatform.getCurrentOperatingSystem().isWindows) {
