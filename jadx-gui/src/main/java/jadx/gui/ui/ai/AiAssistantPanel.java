@@ -21,6 +21,7 @@ import jadx.gui.ai.AiChatMessage;
 import jadx.gui.ai.AiClient;
 import jadx.gui.ai.AiSettings;
 import jadx.gui.ai.ProjectCodeSearch;
+import jadx.gui.ai.ProjectFileOpener;
 import jadx.gui.ui.MainWindow;
 import jadx.gui.utils.NLS;
 
@@ -141,16 +142,18 @@ public class AiAssistantPanel extends JPanel {
 		AtomicReference<Boolean> success = new AtomicReference<>(false);
 		mainWindow.getBackgroundExecutor().execute(NLS.str("ai_assistant.thinking"), () -> {
 			try {
-				AiClient client = new AiClient(settings);
 				List<AiChatMessage> request = new ArrayList<>();
 				request.add(new AiChatMessage(AiChatMessage.ROLE_SYSTEM,
 						"You are an assistant embedded in the jadx Android decompiler GUI, helping the user "
 								+ "understand a specific decompiled Android app. You have a search_code tool that "
-								+ "searches the actual decompiled source of the app currently open in jadx - use it "
-								+ "whenever the question is about what this particular app does, rather than "
-								+ "answering only from general Android knowledge. Be concise."));
+								+ "searches the actual decompiled source of the app currently open in jadx, and an "
+								+ "open_file tool that opens a class or resource for the user directly in jadx. Use "
+								+ "search_code whenever the question is about what this particular app does, rather "
+								+ "than answering only from general Android knowledge, and use open_file when the "
+								+ "user would benefit from looking at a file you found themselves. Be concise."));
 				request.addAll(history);
-				String reply = client.askWithTools(request, new ProjectCodeSearch(mainWindow));
+				String reply = AiClient.askWithToolsAndFailover(settings, request,
+						new ProjectCodeSearch(mainWindow), new ProjectFileOpener(mainWindow));
 				resultText.set(reply);
 				success.set(true);
 			} catch (Throwable e) {

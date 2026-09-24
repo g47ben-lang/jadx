@@ -18,11 +18,13 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.DefaultComboBoxModel;
 import javax.swing.InputMap;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -66,6 +68,7 @@ import jadx.core.utils.StringUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 import jadx.gui.ai.AiChatMessage;
 import jadx.gui.ai.AiClient;
+import jadx.gui.ai.AiKeyProfile;
 import jadx.gui.ai.AiProvider;
 import jadx.gui.ai.AiSettings;
 import jadx.gui.settings.JadxSettings;
@@ -408,45 +411,144 @@ public class JadxSettingsWindow extends JDialog {
 
 	private SettingsGroup makeAiGroup() {
 		AiSettings ai = settings.getAiSettings();
+		ai.migrateLegacyIfNeeded();
 
 		JCheckBox aiEnabled = new JCheckBox();
 		aiEnabled.setSelected(ai.isEnabled());
 		aiEnabled.addItemListener(e -> ai.setEnabled(e.getStateChange() == ItemEvent.SELECTED));
 
+		DefaultComboBoxModel<AiKeyProfile> profilesModel = new DefaultComboBoxModel<>();
+		for (AiKeyProfile profile : ai.getProfiles()) {
+			profilesModel.addElement(profile);
+		}
+		JComboBox<AiKeyProfile> profileCb = new JComboBox<>(profilesModel);
+		int initialIdx = ai.getProfiles().isEmpty() ? -1
+				: Math.max(0, Math.min(ai.getActiveProfileIndex(), ai.getProfiles().size() - 1));
+		if (initialIdx >= 0) {
+			profileCb.setSelectedIndex(initialIdx);
+		}
+
+		JButton addProfileBtn = new JButton(NLS.str("preferences.ai.profile.add"));
+		JButton removeProfileBtn = new JButton(NLS.str("preferences.ai.profile.remove"));
+
+		JTextField nameFld = new JTextField(20);
 		JComboBox<AiProvider> providerCb = new JComboBox<>(AiProvider.values());
-		providerCb.setSelectedItem(ai.getProvider());
-
-		JTextField baseUrlFld = new JTextField(ai.getBaseUrl(), 30);
-		JTextField modelFld = new JTextField(ai.getModel(), 20);
-		JPasswordField apiKeyFld = new JPasswordField(ai.getApiKey(), 30);
-
+		JTextField baseUrlFld = new JTextField(30);
+		JTextField modelFld = new JTextField(20);
+		JPasswordField apiKeyFld = new JPasswordField(30);
 		Link getApiKeyLink = new Link(NLS.str("preferences.ai.get_api_key"), "");
+
+		JComponent[] profileFields = { nameFld, providerCb, baseUrlFld, modelFld, apiKeyFld };
+
+		boolean[] loading = { false };
 		Runnable updateApiKeyLink = () -> {
-			AiProvider provider = ai.getProvider();
-			String url = provider.getApiKeyUrl();
+			AiKeyProfile profile = (AiKeyProfile) profileCb.getSelectedItem();
+			String url = profile == null ? null : profile.getProvider().getApiKeyUrl();
 			getApiKeyLink.setVisible(url != null);
 			if (url != null) {
 				getApiKeyLink.setUrl(url);
 			}
 		};
-		updateApiKeyLink.run();
+		Runnable refreshProfileFields = () -> {
+			loading[0] = true;
+			AiKeyProfile profile = (AiKeyProfile) profileCb.getSelectedItem();
+			boolean has = profile != null;
+			for (JComponent fld : profileFields) {
+				fld.setEnabled(has);
+			}
+			removeProfileBtn.setEnabled(has);
+			if (has) {
+				nameFld.setText(profile.getName());
+				providerCb.setSelectedItem(profile.getProvider());
+				baseUrlFld.setText(profile.getBaseUrl());
+				modelFld.setText(profile.getModel());
+				apiKeyFld.setText(profile.getApiKey());
+			} else {
+				nameFld.setText("");
+				baseUrlFld.setText("");
+				modelFld.setText("");
+				apiKeyFld.setText("");
+			}
+			updateApiKeyLink.run();
+			loading[0] = false;
+		};
+		refreshProfileFields.run();
 
+		profileCb.addActionListener(e -> {
+			if (loading[0]) {
+				return;
+			}
+			ai.setActiveProfileIndex(profileCb.getSelectedIndex());
+			refreshProfileFields.run();
+		});
+
+		addProfileBtn.addActionListener(e -> {
+			AiKeyProfile profile = new AiKeyProfile();
+			ai.getProfiles().add(profile);
+			profilesModel.addElement(profile);
+			profileCb.setSelectedItem(profile);
+			ai.setActiveProfileIndex(profileCb.getSelectedIndex());
+		});
+		removeProfileBtn.addActionListener(e -> {
+			AiKeyProfile profile = (AiKeyProfile) profileCb.getSelectedItem();
+			if (profile == null) {
+				return;
+			}
+			ai.getProfiles().remove(profile);
+			profilesModel.removeElement(profile);
+			ai.setActiveProfileIndex(Math.max(0, profileCb.getSelectedIndex()));
+			refreshProfileFields.run();
+		});
+
+		nameFld.getDocument().addDocumentListener(new DocumentUpdateListener(ev -> {
+			if (!loading[0]) {
+				setSelectedProfileField(profileCb, AiKeyProfile::setName, nameFld.getText());
+				profileCb.repaint();
+			}
+		}));
 		providerCb.addActionListener(e -> {
+			if (loading[0]) {
+				return;
+			}
 			AiProvider provider = (AiProvider) providerCb.getSelectedItem();
-			ai.setProvider(provider);
+			setSelectedProfileField(profileCb, AiKeyProfile::setProvider, provider);
 			if (provider != AiProvider.CUSTOM) {
 				baseUrlFld.setText(provider.getDefaultBaseUrl());
 				modelFld.setText(provider.getDefaultModel());
-				ai.setBaseUrl(provider.getDefaultBaseUrl());
-				ai.setModel(provider.getDefaultModel());
+				setSelectedProfileField(profileCb, AiKeyProfile::setBaseUrl, provider.getDefaultBaseUrl());
+				setSelectedProfileField(profileCb, AiKeyProfile::setModel, provider.getDefaultModel());
 			}
 			updateApiKeyLink.run();
 		});
+		baseUrlFld.getDocument().addDocumentListener(new DocumentUpdateListener(ev -> {
+			if (!loading[0]) {
+				setSelectedProfileField(profileCb, AiKeyProfile::setBaseUrl, baseUrlFld.getText());
+			}
+		}));
+		modelFld.getDocument().addDocumentListener(new DocumentUpdateListener(ev -> {
+			if (!loading[0]) {
+				setSelectedProfileField(profileCb, AiKeyProfile::setModel, modelFld.getText());
+			}
+		}));
+		apiKeyFld.getDocument().addDocumentListener(new DocumentUpdateListener(ev -> {
+			if (!loading[0]) {
+				setSelectedProfileField(profileCb, AiKeyProfile::setApiKey, new String(apiKeyFld.getPassword()));
+			}
+		}));
 
-		baseUrlFld.getDocument().addDocumentListener(new DocumentUpdateListener(ev -> ai.setBaseUrl(baseUrlFld.getText())));
-		modelFld.getDocument().addDocumentListener(new DocumentUpdateListener(ev -> ai.setModel(modelFld.getText())));
-		apiKeyFld.getDocument().addDocumentListener(
-				new DocumentUpdateListener(ev -> ai.setApiKey(new String(apiKeyFld.getPassword()))));
+		JPanel profilePickerPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+		profilePickerPanel.add(profileCb);
+		profilePickerPanel.add(addProfileBtn);
+		profilePickerPanel.add(removeProfileBtn);
+
+		JTextArea profilesHelpText = new JTextArea(NLS.str("preferences.ai.profiles.help_text"));
+		profilesHelpText.setEditable(false);
+		profilesHelpText.setLineWrap(true);
+		profilesHelpText.setWrapStyleWord(true);
+		profilesHelpText.setOpaque(false);
+		profilesHelpText.setFocusable(false);
+		profilesHelpText.setFont(UIManager.getFont("Label.font"));
+		profilesHelpText.setPreferredSize(new Dimension(450, 60));
 
 		JTextField proxyHostFld = new JTextField(ai.getProxyHost(), 15);
 		proxyHostFld.getDocument().addDocumentListener(new DocumentUpdateListener(ev -> ai.setProxyHost(proxyHostFld.getText())));
@@ -485,7 +587,7 @@ public class JadxSettingsWindow extends JDialog {
 		netfreeChb.addItemListener(e -> ai.setTrustSystemCertStore(e.getStateChange() == ItemEvent.SELECTED));
 
 		JButton testBtn = new JButton(NLS.str("preferences.ai.test"));
-		testBtn.addActionListener(ev -> testAiConnection(ai));
+		testBtn.addActionListener(ev -> testAiConnection((AiKeyProfile) profileCb.getSelectedItem()));
 
 		JTextArea helpText = new JTextArea(NLS.str("preferences.ai.help_text"));
 		helpText.setEditable(false);
@@ -499,6 +601,9 @@ public class JadxSettingsWindow extends JDialog {
 		SettingsGroup group = new SettingsGroup(NLS.str("preferences.ai"));
 		group.addRow("", helpText);
 		group.addRow(NLS.str("preferences.ai.enabled"), aiEnabled);
+		group.addRow(NLS.str("preferences.ai.profiles"), NLS.str("preferences.ai.profiles.tooltip"), profilePickerPanel);
+		group.addRow("", profilesHelpText);
+		group.addRow(NLS.str("preferences.ai.profile.name"), nameFld);
 		group.addRow(NLS.str("preferences.ai.provider"), providerCb);
 		group.addRow(NLS.str("preferences.ai.get_api_key"), getApiKeyLink);
 		group.addRow(NLS.str("preferences.ai.base_url"), baseUrlFld);
@@ -514,12 +619,33 @@ public class JadxSettingsWindow extends JDialog {
 		return group;
 	}
 
-	private void testAiConnection(AiSettings ai) {
+	private static void setSelectedProfileField(JComboBox<AiKeyProfile> profileCb, BiConsumer<AiKeyProfile, String> setter,
+			String value) {
+		AiKeyProfile profile = (AiKeyProfile) profileCb.getSelectedItem();
+		if (profile != null) {
+			setter.accept(profile, value);
+		}
+	}
+
+	private static void setSelectedProfileField(JComboBox<AiKeyProfile> profileCb, BiConsumer<AiKeyProfile, AiProvider> setter,
+			AiProvider value) {
+		AiKeyProfile profile = (AiKeyProfile) profileCb.getSelectedItem();
+		if (profile != null) {
+			setter.accept(profile, value);
+		}
+	}
+
+	private void testAiConnection(@Nullable AiKeyProfile profile) {
+		if (profile == null) {
+			JOptionPane.showMessageDialog(this, NLS.str("preferences.ai.profile.none"),
+					NLS.str("preferences.ai.test_failed"), JOptionPane.WARNING_MESSAGE);
+			return;
+		}
 		AtomicReference<String> resultText = new AtomicReference<>();
 		AtomicReference<Boolean> success = new AtomicReference<>(false);
 		mainWindow.getBackgroundExecutor().execute(NLS.str("preferences.ai.testing"), () -> {
 			try {
-				AiClient client = new AiClient(ai);
+				AiClient client = new AiClient(settings.getAiSettings(), profile);
 				String reply = client.sendMessage(List.of(new AiChatMessage(AiChatMessage.ROLE_USER,
 						"Reply with just the word OK if you can read this.")));
 				resultText.set(reply);
