@@ -231,7 +231,8 @@ public class AiClient {
 			TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
 			tmf.init(systemStore);
 			return findX509TrustManager(tmf);
-		} catch (Exception e) {
+		} catch (Throwable e) {
+			// e.g. NoSuchAlgorithmException, or a LinkageError if the jdk.crypto.mscapi module isn't bundled
 			LOG.warn("Windows system certificate store is not available", e);
 			return null;
 		}

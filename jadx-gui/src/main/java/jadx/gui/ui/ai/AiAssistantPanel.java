@@ -140,7 +140,7 @@ public class AiAssistantPanel extends JPanel {
 				String reply = client.sendMessage(request);
 				resultText.set(reply);
 				success.set(true);
-			} catch (Exception e) {
+			} catch (Throwable e) {
 				resultText.set(e.getMessage() != null ? e.getMessage() : e.toString());
 				success.set(false);
 			}
