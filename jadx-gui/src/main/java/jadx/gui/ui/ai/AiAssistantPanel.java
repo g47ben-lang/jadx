@@ -20,6 +20,7 @@ import javax.swing.SwingUtilities;
 import jadx.gui.ai.AiChatMessage;
 import jadx.gui.ai.AiClient;
 import jadx.gui.ai.AiSettings;
+import jadx.gui.ai.ProjectCodeSearch;
 import jadx.gui.ui.MainWindow;
 import jadx.gui.utils.NLS;
 
@@ -134,10 +135,13 @@ public class AiAssistantPanel extends JPanel {
 				AiClient client = new AiClient(settings);
 				List<AiChatMessage> request = new ArrayList<>();
 				request.add(new AiChatMessage(AiChatMessage.ROLE_SYSTEM,
-						"You are an assistant embedded in the jadx Android decompiler GUI, "
-								+ "helping the user understand decompiled Java code. Be concise."));
+						"You are an assistant embedded in the jadx Android decompiler GUI, helping the user "
+								+ "understand a specific decompiled Android app. You have a search_code tool that "
+								+ "searches the actual decompiled source of the app currently open in jadx - use it "
+								+ "whenever the question is about what this particular app does, rather than "
+								+ "answering only from general Android knowledge. Be concise."));
 				request.addAll(history);
-				String reply = client.sendMessage(request);
+				String reply = client.askWithTools(request, new ProjectCodeSearch(mainWindow));
 				resultText.set(reply);
 				success.set(true);
 			} catch (Throwable e) {
