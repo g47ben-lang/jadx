@@ -33,6 +33,7 @@ import jadx.cli.config.JadxConfigAdapter;
 import jadx.cli.config.JadxConfigExclude;
 import jadx.core.utils.GsonUtils;
 import jadx.gui.ai.AiSettings;
+import jadx.gui.rebuild.RebuildSettings;
 import jadx.gui.cache.code.CodeCacheMode;
 import jadx.gui.cache.usage.UsageCacheMode;
 import jadx.gui.settings.data.SaveOptionEnum;
@@ -334,6 +335,10 @@ public class JadxSettings {
 
 	public AiSettings getAiSettings() {
 		return settingsData.getAiSettings();
+	}
+
+	public RebuildSettings getRebuildSettings() {
+		return settingsData.getRebuildSettings();
 	}
 
 	public ShortcutsWrapper getShortcuts() {
