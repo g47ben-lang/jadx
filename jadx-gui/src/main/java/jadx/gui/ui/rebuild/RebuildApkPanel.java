@@ -4,10 +4,13 @@ import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -20,6 +23,8 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+
+import org.jetbrains.annotations.Nullable;
 
 import jadx.api.ResourceFile;
 import jadx.api.ResourceType;
@@ -65,24 +70,27 @@ public class RebuildApkPanel extends JPanel {
 		apktoolPathFld.getDocument().addDocumentListener(
 				new DocumentUpdateListener(ev -> rebuildSettings.setApktoolJarPath(apktoolPathFld.getText())));
 		JButton apktoolBrowseBtn = new JButton(NLS.str("rebuild.browse"));
-		apktoolBrowseBtn.addActionListener(ev -> browseForFile(apktoolPathFld, List.of("jar"), JFileChooser.FILES_ONLY));
+		apktoolBrowseBtn.addActionListener(
+				ev -> browseForFile(apktoolPathFld, List.of("jar"), JFileChooser.FILES_ONLY, true));
 
 		File currentApk = findCurrentApkFile();
 		apkPathFld = new JTextField(currentApk != null ? currentApk.getAbsolutePath() : "", 30);
 		JButton apkBrowseBtn = new JButton(NLS.str("rebuild.browse"));
-		apkBrowseBtn.addActionListener(ev -> browseForFile(apkPathFld, List.of("apk"), JFileChooser.FILES_ONLY));
+		apkBrowseBtn.addActionListener(ev -> browseForFile(apkPathFld, List.of("apk"), JFileChooser.FILES_ONLY, true));
 
 		String defaultDecodedDir = currentApk != null ? currentApk.getAbsolutePath() + "_decoded" : "";
 		decodedDirFld = new JTextField(defaultDecodedDir, 30);
 		JButton decodedDirBrowseBtn = new JButton(NLS.str("rebuild.browse"));
-		decodedDirBrowseBtn.addActionListener(ev -> browseForFile(decodedDirFld, List.of(), JFileChooser.DIRECTORIES_ONLY));
+		decodedDirBrowseBtn.addActionListener(
+				ev -> browseForFile(decodedDirFld, List.of(), JFileChooser.DIRECTORIES_ONLY, true));
 
 		String defaultOutputApk = currentApk != null
 				? currentApk.getAbsolutePath().replaceAll("\\.apk$", "") + "_rebuilt.apk"
 				: "";
 		outputApkFld = new JTextField(defaultOutputApk, 30);
 		JButton outputApkBrowseBtn = new JButton(NLS.str("rebuild.browse"));
-		outputApkBrowseBtn.addActionListener(ev -> browseForFile(outputApkFld, List.of("apk"), JFileChooser.FILES_ONLY));
+		outputApkBrowseBtn.addActionListener(
+				ev -> browseForFile(outputApkFld, List.of("apk"), JFileChooser.FILES_ONLY, false));
 
 		decodeBtn = new JButton(NLS.str("rebuild.decode"));
 		decodeBtn.addActionListener(ev -> decode());
@@ -134,8 +142,9 @@ public class RebuildApkPanel extends JPanel {
 		return row;
 	}
 
-	private void browseForFile(JTextField target, List<String> exts, int selectionMode) {
-		FileDialogWrapper fileDialog = new FileDialogWrapper(mainWindow, FileOpenMode.CUSTOM_SAVE);
+	private void browseForFile(JTextField target, List<String> exts, int selectionMode, boolean openExisting) {
+		FileDialogWrapper fileDialog =
+				new FileDialogWrapper(mainWindow, openExisting ? FileOpenMode.CUSTOM_OPEN : FileOpenMode.CUSTOM_SAVE);
 		fileDialog.setSelectionMode(selectionMode);
 		if (!exts.isEmpty()) {
 			fileDialog.setFileExtList(exts);
@@ -166,7 +175,7 @@ public class RebuildApkPanel extends JPanel {
 			return;
 		}
 		setBusy(true);
-		log("Decoding " + apkFile + " -> " + outputDir + " ...");
+		log(NLS.str("rebuild.log.decoding_start", apkFile.toString(), outputDir.toString()));
 		AtomicReference<ApktoolProcess.Result> resultRef = new AtomicReference<>();
 		AtomicReference<Throwable> errorRef = new AtomicReference<>();
 		mainWindow.getBackgroundExecutor().execute(NLS.str("rebuild.decoding"), () -> {
@@ -178,11 +187,11 @@ public class RebuildApkPanel extends JPanel {
 		}, status -> {
 			setBusy(false);
 			if (errorRef.get() != null) {
-				log("Failed: " + errorRef.get());
+				log(NLS.str("rebuild.log.failed", String.valueOf(errorRef.get())));
 			} else {
 				ApktoolProcess.Result result = resultRef.get();
 				log(result.output);
-				log(result.success ? "Decode finished successfully." : "Decode failed (see output above).");
+				log(NLS.str(result.success ? "rebuild.log.decode_success" : "rebuild.log.decode_failed"));
 			}
 		});
 	}
@@ -195,34 +204,52 @@ public class RebuildApkPanel extends JPanel {
 			return;
 		}
 		setBusy(true);
-		log("Building " + decodedDir + " -> " + outputApk + " ...");
+		log(NLS.str("rebuild.log.build_start", decodedDir.toString(), outputApk.toString()));
 		AtomicReference<String> errorRef = new AtomicReference<>();
 		mainWindow.getBackgroundExecutor().execute(NLS.str("rebuild.building"), () -> {
+			Path tmpDir = null;
 			try {
-				Path tmpDir = Files.createTempDirectory("jadx-rebuild");
+				tmpDir = Files.createTempDirectory("jadx-rebuild");
 				Path unsignedApk = tmpDir.resolve("unsigned.apk");
 				ApktoolProcess.Result buildResult = new ApktoolProcess(apktoolJar).build(decodedDir, unsignedApk);
 				log(buildResult.output);
 				if (!buildResult.success) {
-					errorRef.set("Apktool build failed (see output above).");
+					errorRef.set(NLS.str("rebuild.log.apktool_build_failed"));
 					return;
 				}
-				log("Build finished, signing with a fresh debug key...");
+				log(NLS.str("rebuild.log.signing_start"));
 				Path keystorePath = tmpDir.resolve("debug.keystore");
 				DebugKeystore.KeyMaterial key = DebugKeystore.generate(keystorePath);
 				ApkResigner.sign(key, unsignedApk.toFile(), outputApk.toFile());
-				log("Signed APK written to: " + outputApk);
+				log(NLS.str("rebuild.log.signed_output", outputApk.toString()));
 			} catch (Throwable e) {
 				errorRef.set(e.getMessage() != null ? e.getMessage() : e.toString());
+			} finally {
+				deleteRecursively(tmpDir);
 			}
 		}, status -> {
 			setBusy(false);
 			if (errorRef.get() != null) {
-				log("Failed: " + errorRef.get());
+				log(NLS.str("rebuild.log.failed", errorRef.get()));
 			} else {
-				log("Done.");
+				log(NLS.str("rebuild.log.done"));
 			}
 		});
+	}
+
+	private static void deleteRecursively(@Nullable Path dir) {
+		if (dir == null) {
+			return;
+		}
+		try (Stream<Path> paths = Files.walk(dir)) {
+			paths.sorted(Comparator.reverseOrder()).forEach(p -> {
+				try {
+					Files.deleteIfExists(p);
+				} catch (IOException ignored) {
+				}
+			});
+		} catch (IOException ignored) {
+		}
 	}
 
 	private boolean validateApktoolPath(Path apktoolJar) {
